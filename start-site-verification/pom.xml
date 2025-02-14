@@ -11,10 +11,6 @@
 	<artifactId>start-site-verification</artifactId>
 	<name>start.spring.io website verification</name>
 
-	<properties>
-		<maven-resolver.version>1.8.2</maven-resolver.version>
-	</properties>
-
 	<dependencies>
 		<dependency>
 			<groupId>io.spring.start</groupId>
@@ -32,22 +28,13 @@
 				</exclusion>
 			</exclusions>
 		</dependency>
-	</dependencies>
 
-	<dependencyManagement>
-		<dependencies>
-			<dependency>
-				<groupId>org.apache.maven.resolver</groupId>
-				<artifactId>maven-resolver-connector-basic</artifactId>
-				<version>${maven-resolver.version}</version>
-			</dependency>
-			<dependency>
-				<groupId>org.apache.maven.resolver</groupId>
-				<artifactId>maven-resolver-transport-http</artifactId>
-				<version>${maven-resolver.version}</version>
-			</dependency>
-		</dependencies>
-	</dependencyManagement>
+		<dependency>
+			<groupId>io.spring.start</groupId>
+			<artifactId>test-support</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
 
 	<build>
 		<plugins>

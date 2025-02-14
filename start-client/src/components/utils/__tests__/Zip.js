@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import fs from 'fs'
-import get from 'lodash.get'
+import get from 'lodash/get'
 import path from 'path'
 
 import { createTree, findRoot, getLanguage } from '../Zip'
@@ -17,6 +17,7 @@ describe('getLanguage', () => {
     expect(getLanguage('index.kts')).toBe('kotlin')
     expect(getLanguage('index.gradle')).toBe('groovy')
     expect(getLanguage('index.gitignore')).toBe('git')
+    expect(getLanguage('index.gitattributes')).toBe('git')
     expect(getLanguage('index.java')).toBe('java')
     expect(getLanguage('index.xml')).toBe('xml')
     expect(getLanguage('index.properties')).toBe('properties')
