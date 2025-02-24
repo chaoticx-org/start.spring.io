@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2023 the original author or authors.
+ * Copyright 2012-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,14 @@
 
 package io.spring.start.site.extension.dependency.activemq;
 
-import io.spring.initializr.generator.condition.ConditionalOnPlatformVersion;
 import io.spring.initializr.generator.condition.ConditionalOnRequestedDependency;
 import io.spring.initializr.generator.project.ProjectGenerationConfiguration;
-import io.spring.initializr.generator.spring.build.BuildCustomizer;
-import io.spring.initializr.generator.spring.documentation.HelpDocumentCustomizer;
+import io.spring.start.site.container.ComposeFileCustomizer;
+import io.spring.start.site.container.DockerServiceResolver;
+import io.spring.start.site.container.ServiceConnections.ServiceConnection;
+import io.spring.start.site.container.ServiceConnectionsCustomizer;
 
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.Ordered;
 
 /**
  * Configuration for generation of projects that depend on ActiveMQ.
@@ -34,21 +34,21 @@ import org.springframework.core.Ordered;
 @ConditionalOnRequestedDependency("activemq")
 public class ActiveMQProjectGenerationConfiguration {
 
-	@ConditionalOnPlatformVersion("[3.0.0-M1,3.1.0-RC1)")
-	static class SpringBoot30Configuration {
+	private static final String TESTCONTAINERS_CLASS_NAME = "org.testcontainers.activemq.ActiveMQContainer";
 
-		@Bean
-		BuildCustomizer<?> activeMQNotSupportedBuildCustomizer() {
-			return BuildCustomizer.ordered(Ordered.HIGHEST_PRECEDENCE + 5,
-					(build) -> build.dependencies().remove("activemq"));
-		}
+	@Bean
+	@ConditionalOnRequestedDependency("testcontainers")
+	ServiceConnectionsCustomizer activeMQClassicServiceConnectionsCustomizer(DockerServiceResolver serviceResolver) {
+		return (serviceConnections) -> serviceResolver.doWith("activeMQClassic",
+				(service) -> serviceConnections.addServiceConnection(
+						ServiceConnection.ofContainer("activemq", service, TESTCONTAINERS_CLASS_NAME, false)));
+	}
 
-		@Bean
-		HelpDocumentCustomizer activeMQNotSupportedHelpDocumentCustomizer() {
-			return (helpDocument) -> helpDocument.getWarnings()
-				.addItem("ActiveMQ is not supported with Spring Boot 3.0");
-		}
-
+	@Bean
+	@ConditionalOnRequestedDependency("docker-compose")
+	ComposeFileCustomizer activeMQClassicComposeFileCustomizer(DockerServiceResolver serviceResolver) {
+		return (composeFile) -> serviceResolver.doWith("activeMQClassic",
+				(service) -> composeFile.services().add("activemq", service));
 	}
 
 }
