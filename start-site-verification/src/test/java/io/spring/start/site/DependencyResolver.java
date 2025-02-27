@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2023 the original author or authors.
+ * Copyright 2012-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,27 +16,28 @@
 
 package io.spring.start.site;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import io.spring.initializr.metadata.BillOfMaterials;
+import io.spring.start.testsupport.Homes;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
+import org.eclipse.aether.collection.CollectResult;
+import org.eclipse.aether.collection.DependencyCollectionException;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
 import org.eclipse.aether.graph.Dependency;
+import org.eclipse.aether.graph.DependencyFilter;
+import org.eclipse.aether.graph.DependencyNode;
+import org.eclipse.aether.graph.DependencyVisitor;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.internal.impl.DefaultRepositorySystem;
 import org.eclipse.aether.repository.LocalRepository;
@@ -45,60 +46,45 @@ import org.eclipse.aether.repository.RemoteRepository.Builder;
 import org.eclipse.aether.repository.RepositoryPolicy;
 import org.eclipse.aether.resolution.ArtifactDescriptorException;
 import org.eclipse.aether.resolution.ArtifactDescriptorRequest;
-import org.eclipse.aether.resolution.ArtifactResult;
-import org.eclipse.aether.resolution.DependencyRequest;
-import org.eclipse.aether.resolution.DependencyResolutionException;
-import org.eclipse.aether.resolution.DependencyResult;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
-import org.eclipse.aether.spi.connector.transport.GetTask;
-import org.eclipse.aether.spi.connector.transport.PeekTask;
-import org.eclipse.aether.spi.connector.transport.PutTask;
-import org.eclipse.aether.spi.connector.transport.Transporter;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.spi.locator.ServiceLocator;
-import org.eclipse.aether.transfer.NoTransporterException;
+import org.eclipse.aether.transfer.AbstractTransferListener;
+import org.eclipse.aether.transfer.TransferEvent;
+import org.eclipse.aether.transfer.TransferResource;
 import org.eclipse.aether.transport.http.HttpTransporterFactory;
 import org.eclipse.aether.util.artifact.JavaScopes;
 import org.eclipse.aether.util.filter.DependencyFilterUtils;
+import org.eclipse.aether.util.graph.visitor.FilteringDependencyVisitor;
 import org.eclipse.aether.util.repository.SimpleArtifactDescriptorPolicy;
-
-import org.springframework.util.FileSystemUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 final class DependencyResolver {
 
-	private static final Collection<DependencyResolver> instances = new ArrayList<>();
-
-	private static final ThreadLocal<DependencyResolver> instanceForThread = ThreadLocal.withInitial(() -> {
-		DependencyResolver instance = new DependencyResolver();
-		instances.add(instance);
-		return instance;
-	});
-
-	private static final RepositoryPolicy repositoryPolicy = new RepositoryPolicy(true,
-			RepositoryPolicy.UPDATE_POLICY_NEVER, RepositoryPolicy.CHECKSUM_POLICY_IGNORE);
+	private static final Logger LOGGER = LoggerFactory.getLogger(DependencyResolver.class);
 
 	static final RemoteRepository mavenCentral = createRemoteRepository("central", "https://repo1.maven.org/maven2",
 			false);
 
 	private static final Map<String, List<Dependency>> managedDependencies = new ConcurrentHashMap<>();
 
-	private final Path localRepositoryLocation;
-
 	private final RepositorySystemSession repositorySystemSession;
 
 	private final RepositorySystem repositorySystem;
 
-	DependencyResolver() {
+	DependencyResolver(Path localRepositoryLocation) {
 		try {
 			ServiceLocator serviceLocator = createServiceLocator();
 			DefaultRepositorySystemSession session = MavenRepositorySystemUtils.newSession();
+			session.setTransferListener(new Slf4jTransferListener());
 			session.setArtifactDescriptorPolicy(new SimpleArtifactDescriptorPolicy(false, false));
-			this.localRepositoryLocation = Files.createTempDirectory("metadata-validation-m2");
-			LocalRepository localRepository = new LocalRepository(this.localRepositoryLocation.toFile());
+			LocalRepository localRepository = new LocalRepository(localRepositoryLocation.toFile());
 			this.repositorySystem = serviceLocator.getService(RepositorySystem.class);
 			session
 				.setLocalRepositoryManager(this.repositorySystem.newLocalRepositoryManager(session, localRepository));
 			session.setUserProperties(System.getProperties());
+			session.setIgnoreArtifactDescriptorRepositories(true);
 			session.setReadOnly();
 			this.repositorySystemSession = session;
 		}
@@ -107,51 +93,32 @@ final class DependencyResolver {
 		}
 	}
 
+	private static RepositoryPolicy repositoryPolicy(boolean enabled) {
+		return new RepositoryPolicy(enabled, RepositoryPolicy.UPDATE_POLICY_NEVER,
+				RepositoryPolicy.CHECKSUM_POLICY_IGNORE);
+	}
+
 	static RemoteRepository createRemoteRepository(String id, String url, boolean snapshot) {
 		Builder repositoryBuilder = new Builder(id, "default", url);
-		if (snapshot) {
-			repositoryBuilder.setSnapshotPolicy(repositoryPolicy);
-		}
-		else {
-			repositoryBuilder.setReleasePolicy(repositoryPolicy);
-		}
+		repositoryBuilder.setSnapshotPolicy(repositoryPolicy(snapshot));
+		repositoryBuilder.setReleasePolicy(repositoryPolicy(!snapshot));
 		return repositoryBuilder.build();
 	}
 
-	static List<String> resolveDependencies(String groupId, String artifactId, String version,
+	static List<String> resolveDependencies(Homes homes, String groupId, String artifactId, String version,
 			List<BillOfMaterials> boms, List<RemoteRepository> repositories) {
-		DependencyResolver instance = instanceForThread.get();
-		List<Dependency> managedDependencies = instance.getManagedDependencies(boms, repositories);
+		DependencyResolver resolver = new DependencyResolver(homes.get().resolve("repository"));
+		List<Dependency> managedDependencies = resolver.getManagedDependencies(boms, repositories);
 		Dependency aetherDependency = new Dependency(new DefaultArtifact(groupId, artifactId, "pom",
-				instance.getVersion(groupId, artifactId, version, managedDependencies)), "compile");
-		CollectRequest collectRequest = new CollectRequest((org.eclipse.aether.graph.Dependency) null,
-				Collections.singletonList(aetherDependency), repositories);
+				resolver.getVersion(groupId, artifactId, version, managedDependencies)), "compile");
+		CollectRequest collectRequest = new CollectRequest(aetherDependency, repositories);
 		collectRequest.setManagedDependencies(managedDependencies);
-		DependencyRequest dependencyRequest = new DependencyRequest(collectRequest,
-				DependencyFilterUtils.classpathFilter(JavaScopes.COMPILE, JavaScopes.RUNTIME));
 		try {
-			return instance.resolveDependencies(dependencyRequest)
-				.getArtifactResults()
-				.stream()
-				.map(ArtifactResult::getArtifact)
-				.map((artifact) -> artifact.getGroupId() + ":" + artifact.getArtifactId())
-				.collect(Collectors.toList());
+			CollectResult result = resolver.collectDependencies(collectRequest);
+			return DependencyCollector.collect(result.getRoot(), RuntimeTransitiveOnlyDependencyFilter.INSTANCE);
 		}
-		catch (DependencyResolutionException ex) {
+		catch (DependencyCollectionException ex) {
 			throw new RuntimeException(ex);
-		}
-	}
-
-	static void cleanUp() {
-		instances.forEach(DependencyResolver::deleteLocalRepository);
-	}
-
-	void deleteLocalRepository() {
-		try {
-			FileSystemUtils.deleteRecursively(this.localRepositoryLocation);
-		}
-		catch (IOException ex) {
-			// Continue
 		}
 	}
 
@@ -159,19 +126,19 @@ final class DependencyResolver {
 		return boms.stream()
 			.flatMap((bom) -> getManagedDependencies(bom.getGroupId(), bom.getArtifactId(), bom.getVersion(),
 					repositories))
-			.collect(Collectors.toList());
+			.toList();
 	}
 
 	private Stream<Dependency> getManagedDependencies(String groupId, String artifactId, String version,
 			List<RemoteRepository> repositories) {
 		String key = groupId + ":" + artifactId + ":" + version;
-		List<org.eclipse.aether.graph.Dependency> managedDependencies = DependencyResolver.managedDependencies
-			.computeIfAbsent(key, (coords) -> resolveManagedDependencies(groupId, artifactId, version, repositories));
+		List<Dependency> managedDependencies = DependencyResolver.managedDependencies.computeIfAbsent(key,
+				(coords) -> resolveManagedDependencies(groupId, artifactId, version, repositories));
 		return managedDependencies.stream();
 	}
 
-	private List<org.eclipse.aether.graph.Dependency> resolveManagedDependencies(String groupId, String artifactId,
-			String version, List<RemoteRepository> repositories) {
+	private List<Dependency> resolveManagedDependencies(String groupId, String artifactId, String version,
+			List<RemoteRepository> repositories) {
 		try {
 			return this.repositorySystem
 				.readArtifactDescriptor(this.repositorySystemSession,
@@ -184,19 +151,15 @@ final class DependencyResolver {
 		}
 	}
 
-	private DependencyResult resolveDependencies(DependencyRequest dependencyRequest)
-			throws DependencyResolutionException {
-		DependencyResult resolved = this.repositorySystem.resolveDependencies(this.repositorySystemSession,
-				dependencyRequest);
-		return resolved;
+	private CollectResult collectDependencies(CollectRequest dependencyRequest) throws DependencyCollectionException {
+		return this.repositorySystem.collectDependencies(this.repositorySystemSession, dependencyRequest);
 	}
 
-	private String getVersion(String groupId, String artifactId, String version,
-			List<org.eclipse.aether.graph.Dependency> managedDependencies) {
+	private String getVersion(String groupId, String artifactId, String version, List<Dependency> managedDependencies) {
 		if (version != null) {
 			return version;
 		}
-		for (org.eclipse.aether.graph.Dependency managedDependency : managedDependencies) {
+		for (Dependency managedDependency : managedDependencies) {
 			if (groupId.equals(managedDependency.getArtifact().getGroupId())
 					&& artifactId.equals(managedDependency.getArtifact().getArtifactId())) {
 				return managedDependency.getArtifact().getVersion();
@@ -209,61 +172,72 @@ final class DependencyResolver {
 		DefaultServiceLocator locator = MavenRepositorySystemUtils.newServiceLocator();
 		locator.addService(RepositorySystem.class, DefaultRepositorySystem.class);
 		locator.addService(RepositoryConnectorFactory.class, BasicRepositoryConnectorFactory.class);
-		locator.addService(TransporterFactory.class, DependencyResolver.JarSkippingHttpTransporterFactory.class);
+		locator.addService(TransporterFactory.class, HttpTransporterFactory.class);
 		return locator;
 	}
 
-	private static class JarSkippingHttpTransporterFactory implements TransporterFactory {
+	static class DependencyCollector implements DependencyVisitor {
 
-		private final HttpTransporterFactory delegate = new HttpTransporterFactory();
+		private final List<String> dependencies = new ArrayList<>();
 
-		@Override
-		public Transporter newInstance(RepositorySystemSession session, RemoteRepository repository)
-				throws NoTransporterException {
-			return new JarGetSkippingTransporter(this.delegate.newInstance(session, repository));
+		static List<String> collect(DependencyNode node, DependencyFilter filter) {
+			DependencyCollector collector = new DependencyCollector();
+			node.accept(new FilteringDependencyVisitor(collector, filter));
+			return collector.dependencies;
 		}
 
 		@Override
-		public float getPriority() {
-			return 5.0f;
+		public boolean visitEnter(DependencyNode node) {
+			return this.dependencies.add(node.getDependency().getArtifact().getGroupId() + ":"
+					+ node.getDependency().getArtifact().getArtifactId());
 		}
 
-		private static final class JarGetSkippingTransporter implements Transporter {
+		@Override
+		public boolean visitLeave(DependencyNode node) {
+			return true;
+		}
 
-			private final Transporter delegate;
+	}
 
-			private JarGetSkippingTransporter(Transporter delegate) {
-				this.delegate = delegate;
-			}
+	static class RuntimeTransitiveOnlyDependencyFilter implements DependencyFilter {
 
-			@Override
-			public int classify(Throwable error) {
-				return this.delegate.classify(error);
-			}
+		private static final RuntimeTransitiveOnlyDependencyFilter INSTANCE = new RuntimeTransitiveOnlyDependencyFilter();
 
-			@Override
-			public void peek(PeekTask task) throws Exception {
-				this.delegate.peek(task);
-			}
+		private final DependencyFilter runtimeFilter = DependencyFilterUtils.classpathFilter(JavaScopes.COMPILE,
+				JavaScopes.RUNTIME);
 
-			@Override
-			public void get(GetTask task) throws Exception {
-				if (task.getLocation().getPath().endsWith(".jar")) {
-					return;
-				}
-				this.delegate.get(task);
-			}
+		@Override
+		public boolean accept(DependencyNode node, List<DependencyNode> parents) {
+			return !node.getDependency().isOptional() && this.runtimeFilter.accept(node, parents);
+		}
 
-			@Override
-			public void put(PutTask task) throws Exception {
-				this.delegate.put(task);
-			}
+	}
 
-			@Override
-			public void close() {
-				this.delegate.close();
-			}
+	private static final class Slf4jTransferListener extends AbstractTransferListener {
 
+		@Override
+		public void transferStarted(TransferEvent event) {
+			LOGGER.info("Started downloading {}", resourceToString(event.getResource()));
+		}
+
+		@Override
+		public void transferCorrupted(TransferEvent event) {
+			LOGGER.warn("Found corrupted download {}", resourceToString(event.getResource()));
+		}
+
+		@Override
+		public void transferSucceeded(TransferEvent event) {
+			LOGGER.info("Done downloading {} bytes for {}", event.getTransferredBytes(),
+					resourceToString(event.getResource()));
+		}
+
+		@Override
+		public void transferFailed(TransferEvent event) {
+			LOGGER.info("Failed downloading {}", resourceToString(event.getResource()));
+		}
+
+		private String resourceToString(TransferResource resource) {
+			return resource.getRepositoryUrl() + resource.getResourceName();
 		}
 
 	}

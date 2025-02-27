@@ -44,10 +44,22 @@ const config = {
         test: /.(js|jsx)$/,
         exclude: [path.resolve(__dirname, 'node_modules')],
         loader: 'babel-loader',
+        options: {
+          plugins: ['lodash'],
+        },
       },
       {
         test: /\.s[ac]ss$/i,
-        use: ['style-loader', 'css-loader', 'sass-loader'],
+        use: [
+          'style-loader',
+          'css-loader',
+          {
+            loader: 'sass-loader',
+            options: {
+              warnRuleAsWarning: false,
+            },
+          },
+        ],
       },
       {
         test: /\.(woff(2)?|ttf|eot|svg)(\?v=\d+\.\d+\.\d+)?$/,

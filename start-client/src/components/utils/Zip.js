@@ -1,4 +1,4 @@
-import get from 'lodash.get'
+import get from 'lodash/get'
 
 const FILE_EXTENSION = {
   js: 'javascript',
@@ -7,6 +7,7 @@ const FILE_EXTENSION = {
   kts: 'kotlin',
   gradle: 'groovy',
   gitignore: 'git',
+  gitattributes: 'git',
   java: 'java',
   xml: 'xml',
   properties: 'properties',
